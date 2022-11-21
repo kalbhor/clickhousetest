@@ -3,6 +3,7 @@ package clickhousetest
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"os"
@@ -12,16 +13,6 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 )
 
-// minimal config to specifiy port.
-// rest of the config is picked from clickhouse's config path preferences.
-var (
-	serverCfg = `
-	<config>
-    <port>%d</port>
-	</config>
-	`
-)
-
 const (
 	// temp directory to store db data.
 	defaultDir = "clickhousetest"
@@ -29,12 +20,12 @@ const (
 	binName = "clickhouse"
 	// clickhouse allows overriding main config files by adding new configs
 	// to the below path.
-	configPath = "/etc/clickhouse-server/config.d"
 )
 
 // Server holds the connections and metadata (such as db directory, clickhouse path, etc)
 // for the ephemeral clickhouse server.
 type Server struct {
+	opts    Options
 	binPath string
 	dbDir   string
 	port    int
@@ -42,14 +33,42 @@ type Server struct {
 	conn    clickhouse.Conn
 }
 
+type Options struct {
+	ExecMode  bool
+	DBOptions clickhouse.Options
+}
+
 // Start creates an ephemeral clickhouse server and does the relevant connections
 // required for CreateDatabase & other methods.
-func Start(ctx context.Context) (*Server, error) {
+func Start(ctx context.Context, o Options) (*Server, error) {
+	// If exec mode is false, just connect to existing clickhouse.
+	if !o.ExecMode {
+		s := &Server{opts: o}
+		err := s.startNoExec(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("start server : %w", err)
+		}
+
+		return s, nil
+	}
+
+	// TODO: assign random port here.
+	o.DBOptions = clickhouse.Options{
+		Addr: []string{"127.0.0.1:9000"},
+		Auth: clickhouse.Auth{
+			Database: "default",
+			Username: "default",
+			Password: "",
+		},
+	}
+
 	// prepare data directory
 	dir, err := os.MkdirTemp("", defaultDir)
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir : %w", err)
 	}
+
+	log.Println("dir", dir)
 
 	// try looking for the clickhouse-server executable path.
 	bin, err := exec.LookPath(binName)
@@ -58,28 +77,13 @@ func Start(ctx context.Context) (*Server, error) {
 	}
 
 	// TODO: figure out a way to create & pass a custom
-	// config file with custom port.
-
-	// get an unused port, added to the config file.
-	// port, err := findUnusedTCPPort()
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// // write the config file with specific port.
-	// err = os.Mkdir(configPath, 0644)
-	// if err != nil {
-	// 	return nil, err
-	// // }
-	// cfgFile := fmt.Sprintf(serverCfg, port)
-	// err = ioutil.WriteFile(configPath+"/config-temp.xml", []byte(cfgFile), 0644)
-	// if err != nil {
-	// 	return nil, err
-	// }
-
+	// config file with custom port. Also, specify directory in config
+	// & do away with cmd.Dir assignement
+	cmd := exec.Command(bin, "server")
+	cmd.Dir = dir
 	s := &Server{
 		//port:    port,
-		cmd:     exec.Command(bin, "server"),
+		cmd:     cmd,
 		dbDir:   dir,
 		binPath: bin,
 	}
@@ -89,6 +93,10 @@ func Start(ctx context.Context) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+func (s *Server) startNoExec(ctx context.Context) error {
+	return nil
 }
 
 // cleanup stops the server & deletes the db directory.
@@ -115,7 +123,6 @@ func (s *Server) start(ctx context.Context) error {
 			s.cleanup()
 		}
 	}()
-
 	err = s.cmd.Start()
 	if err != nil {
 		return err
@@ -124,7 +131,7 @@ func (s *Server) start(ctx context.Context) error {
 	// Wait for a max of 10 seconds to connect to the db.
 	for i := 0; i < 10; i++ {
 		time.Sleep(time.Second)
-		s.conn, err = s.connectDB(ctx, "default")
+		s.conn, err = s.connectDB(ctx, s.opts.DBOptions)
 		if err != nil {
 			continue
 		}
@@ -136,8 +143,10 @@ func (s *Server) start(ctx context.Context) error {
 }
 
 func (s *Server) Stop() error {
-	if err := s.cleanup(); err != nil {
-		return fmt.Errorf("cleanup temp files : %w", err)
+	if !s.opts.ExecMode {
+		if err := s.cleanup(); err != nil {
+			return fmt.Errorf("cleanup temp files : %w", err)
+		}
 	}
 
 	if s.conn != nil {
@@ -151,12 +160,16 @@ func (s *Server) Stop() error {
 }
 
 func (s *Server) NewDatabase(ctx context.Context) (clickhouse.Conn, error) {
-	db, err := s.CreateDatabase(ctx)
+	var (
+		dbOpts = s.opts.DBOptions
+		err    error
+	)
+
+	dbOpts.Auth.Database, err = s.CreateDatabase(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	conn, err := s.connectDB(ctx, db)
+	conn, err := s.connectDB(ctx, dbOpts)
 	if err != nil {
 		return nil, fmt.Errorf("connect to db : %w", err)
 	}
@@ -175,17 +188,8 @@ func (s *Server) CreateDatabase(ctx context.Context) (string, error) {
 	return db, nil
 }
 
-func (s *Server) connectDB(ctx context.Context, db string) (clickhouse.Conn, error) {
-	// TODO: replace default port with custom, used while
-	// running the server.
-	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{"127.0.0.1:9000"},
-		Auth: clickhouse.Auth{
-			Database: db,
-			Username: "default",
-			Password: "",
-		},
-	})
+func (s *Server) connectDB(ctx context.Context, o clickhouse.Options) (clickhouse.Conn, error) {
+	conn, err := clickhouse.Open(&o)
 	if err != nil {
 		return nil, err
 	}
@@ -204,6 +208,41 @@ func randomString(length int) string {
 	rand.Read(b)
 	return fmt.Sprintf("%x", b)[:length]
 }
+
+// WIP
+
+// minimal config to specifiy port.
+// rest of the config is picked from clickhouse's config path preferences.
+var (
+	serverCfg = `
+	<config>
+    <port>%d</port>
+	</config>
+	`
+)
+
+const (
+	configPath = "/etc/clickhouse-server/config.d"
+)
+
+// func (s *Server) createConfg() {
+// 	// get an unused port, added to the config file.
+// 	// port, err := findUnusedTCPPort()
+// 	// if err != nil {
+// 	// 	return nil, err
+// 	// }
+
+// 	// // write the config file with specific port.
+// 	// err = os.Mkdir(configPath, 0644)
+// 	// if err != nil {
+// 	// 	return nil, err
+// 	// // }
+// 	// cfgFile := fmt.Sprintf(serverCfg, port)
+// 	// err = ioutil.WriteFile(configPath+"/config-temp.xml", []byte(cfgFile), 0644)
+// 	// if err != nil {
+// 	// 	return nil, err
+// 	// }
+// }
 
 func findUnusedTCPPort() (int, error) {
 	l, err := net.ListenTCP("tcp", &net.TCPAddr{

@@ -22,17 +22,16 @@ type Result struct {
 }
 
 func TestStart(t *testing.T) {
-	server, err := Start(context.Background())
+	server, err := Start(context.Background(), Options{ExecMode: true})
 	defer server.Stop()
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
-
 }
 
 func TestNewDatabase(t *testing.T) {
 	ctx := context.Background()
-	server, err := Start(ctx)
+	server, err := Start(ctx, Options{ExecMode: true})
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
