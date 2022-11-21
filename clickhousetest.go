@@ -96,6 +96,16 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 }
 
 func (s *Server) startNoExec(ctx context.Context) error {
+	var err error
+	// Wait for a max of 10 seconds to connect to the db.
+	for i := 0; i < 10; i++ {
+		time.Sleep(time.Second)
+		s.conn, err = s.connectDB(ctx, s.opts.DBOptions)
+		if err != nil {
+			continue
+		}
+		break
+	}
 	return nil
 }
 
@@ -143,7 +153,7 @@ func (s *Server) start(ctx context.Context) error {
 }
 
 func (s *Server) Stop() error {
-	if !s.opts.ExecMode {
+	if s.opts.ExecMode {
 		if err := s.cleanup(); err != nil {
 			return fmt.Errorf("cleanup temp files : %w", err)
 		}
