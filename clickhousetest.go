@@ -34,7 +34,7 @@ type Server struct {
 }
 
 type Options struct {
-	ExecMode  bool
+	NoExec    bool
 	DBOptions clickhouse.Options
 }
 
@@ -42,7 +42,7 @@ type Options struct {
 // required for CreateDatabase & other methods.
 func Start(ctx context.Context, o Options) (*Server, error) {
 	// If exec mode is false, just connect to existing clickhouse.
-	if !o.ExecMode {
+	if o.NoExec {
 		s := &Server{opts: o}
 		err := s.startNoExec(ctx)
 		if err != nil {
@@ -153,7 +153,7 @@ func (s *Server) start(ctx context.Context) error {
 }
 
 func (s *Server) Stop() error {
-	if s.opts.ExecMode {
+	if !s.opts.NoExec {
 		if err := s.cleanup(); err != nil {
 			return fmt.Errorf("cleanup temp files : %w", err)
 		}
@@ -175,7 +175,7 @@ func (s *Server) NewDatabase(ctx context.Context) (clickhouse.Conn, error) {
 		err    error
 	)
 
-	dbOpts.Auth.Database, err = s.CreateDatabase(ctx)
+	dbOpts.Auth.Database, err = s.createDatabase(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -187,8 +187,8 @@ func (s *Server) NewDatabase(ctx context.Context) (clickhouse.Conn, error) {
 	return conn, nil
 }
 
-// CreateDatabase creates a new random database and returns its dsn.
-func (s *Server) CreateDatabase(ctx context.Context) (string, error) {
+// createDatabase creates a new random database and returns its dsn.
+func (s *Server) createDatabase(ctx context.Context) (string, error) {
 	db := randomString(8)
 	err := s.conn.Exec(ctx, "CREATE DATABASE "+db+";")
 	if err != nil {

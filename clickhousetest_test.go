@@ -8,7 +8,7 @@ import (
 
 var (
 	createTable = `
-CREATE TABLE IF NOT EXISTS ticks (
+CREATE TABLE instruments (
     token UInt64,
     timestamp DateTime('Asia/Kolkata'),
     price Int64,
@@ -23,7 +23,7 @@ type Result struct {
 }
 
 func TestStart(t *testing.T) {
-	server, err := Start(context.Background(), Options{ExecMode: true})
+	server, err := Start(context.Background(), Options{})
 	defer server.Stop()
 	if err != nil {
 		t.Fatalf(err.Error())
@@ -43,7 +43,7 @@ func TestStartNoExec(t *testing.T) {
 		t.Errorf("could not start docker container : %v", err)
 	}
 
-	server, err := Start(context.Background(), Options{ExecMode: false})
+	server, err := Start(context.Background(), Options{NoExec: true})
 	defer server.Stop()
 	if err != nil {
 		t.Errorf("could not start server : %v", err)
@@ -69,7 +69,7 @@ func TestStartNoExec(t *testing.T) {
 
 func TestNewDatabase(t *testing.T) {
 	ctx := context.Background()
-	server, err := Start(ctx, Options{ExecMode: true})
+	server, err := Start(ctx, Options{})
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
