@@ -3,6 +3,8 @@ package clickhousetest
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"net"
 	"os"
 	"os/exec"
 	"time"
@@ -30,7 +32,7 @@ const (
 	configPath = "/etc/clickhouse-server/config.d"
 )
 
-// server holds the connections and metadata (such as db directory, clickhouse path, etc)
+// Server holds the connections and metadata (such as db directory, clickhouse path, etc)
 // for the ephemeral clickhouse server.
 type Server struct {
 	binPath string
@@ -40,17 +42,19 @@ type Server struct {
 	conn    clickhouse.Conn
 }
 
-func New() (*Server, error) {
+// Start creates an ephemeral clickhouse server and does the relevant connections
+// required for CreateDatabase & other methods.
+func Start(ctx context.Context) (*Server, error) {
 	// prepare data directory
 	dir, err := os.MkdirTemp("", defaultDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create temp dir : %w", err)
 	}
 
 	// try looking for the clickhouse-server executable path.
 	bin, err := exec.LookPath(binName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("find bin path : %w", err)
 	}
 
 	// TODO: figure out a way to create & pass a custom
@@ -73,12 +77,18 @@ func New() (*Server, error) {
 	// 	return nil, err
 	// }
 
-	return &Server{
+	s := &Server{
 		//port:    port,
 		cmd:     exec.Command(bin, "server"),
 		dbDir:   dir,
 		binPath: bin,
-	}, nil
+	}
+	err = s.start(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("start server : %w", err)
+	}
+
+	return s, nil
 }
 
 // cleanup stops the server & deletes the db directory.
@@ -98,9 +108,8 @@ func (s *Server) cleanup() error {
 	return nil
 }
 
-func (s *Server) Start(ctx context.Context) error {
+func (s *Server) start(ctx context.Context) error {
 	var err error
-
 	defer func() {
 		if err != nil {
 			s.cleanup()
@@ -112,60 +121,100 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	err = s.connectDB()
-	if err != nil {
-		return err
+	// Wait for a max of 10 seconds to connect to the db.
+	for i := 0; i < 10; i++ {
+		time.Sleep(time.Second)
+		s.conn, err = s.connectDB(ctx, "default")
+		if err != nil {
+			continue
+		}
+
+		return nil
 	}
-	// TODO: create a temp db here.
+
+	return fmt.Errorf("clickhouse not accepting connections")
+}
+
+func (s *Server) Stop() error {
+	if err := s.cleanup(); err != nil {
+		return fmt.Errorf("cleanup temp files : %w", err)
+	}
+
+	if s.conn != nil {
+		err := s.conn.Close()
+		if err != nil {
+			return fmt.Errorf("close db conn : %w", err)
+		}
+	}
 
 	return nil
 }
 
-func (s *Server) Stop() error {
-	return s.cleanup()
+func (s *Server) NewDatabase(ctx context.Context) (clickhouse.Conn, error) {
+	db, err := s.CreateDatabase(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := s.connectDB(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("connect to db : %w", err)
+	}
+
+	return conn, nil
 }
 
-func (s *Server) connectDB() error {
+// CreateDatabase creates a new random database and returns its dsn.
+func (s *Server) CreateDatabase(ctx context.Context) (string, error) {
+	db := randomString(8)
+	err := s.conn.Exec(ctx, "CREATE DATABASE "+db+";")
+	if err != nil {
+		return "", fmt.Errorf("exec create db query : %w", err)
+	}
+
+	return db, nil
+}
+
+func (s *Server) connectDB(ctx context.Context, db string) (clickhouse.Conn, error) {
 	// TODO: replace default port with custom, used while
 	// running the server.
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{"127.0.0.1:9000"},
 		Auth: clickhouse.Auth{
-			Database: "default",
+			Database: db,
 			Username: "default",
 			Password: "",
 		},
-		Debug: true,
-		Debugf: func(format string, v ...interface{}) {
-			fmt.Printf(format, v)
-		},
-		Settings: clickhouse.Settings{
-			"max_execution_time": 60,
-		},
-		DialTimeout:      time.Duration(10) * time.Second,
-		MaxOpenConns:     5,
-		MaxIdleConns:     5,
-		ConnMaxLifetime:  time.Duration(10) * time.Minute,
-		ConnOpenStrategy: clickhouse.ConnOpenInOrder,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	s.conn = conn
 
-	return nil
+	err = conn.Ping(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return conn, nil
 }
 
-// func findUnusedTCPPort() (int, error) {
-// 	l, err := net.ListenTCP("tcp", &net.TCPAddr{
-// 		IP: net.IPv4(127, 0, 0, 1),
-// 	})
-// 	if err != nil {
-// 		return 0, fmt.Errorf("find unused tcp port: %w", err)
-// 	}
-// 	port := l.Addr().(*net.TCPAddr).Port
-// 	if err := l.Close(); err != nil {
-// 		return 0, fmt.Errorf("find unused tcp port: %w", err)
-// 	}
-// 	return port, nil
-// }
+func randomString(length int) string {
+	rand.Seed(time.Now().UnixNano())
+	b := make([]byte, length)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)[:length]
+}
+
+func findUnusedTCPPort() (int, error) {
+	l, err := net.ListenTCP("tcp", &net.TCPAddr{
+		IP: net.IPv4(127, 0, 0, 1),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("find unused tcp port: %w", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		return 0, fmt.Errorf("find unused tcp port: %w", err)
+	}
+	return port, nil
+}
